@@ -22,21 +22,14 @@ import smtplib
 import logging
 import socket
 
+import dns.resolver
+
 try:
     raw_input
 except NameError:
     def raw_input(prompt=''):
         return input(prompt)
 
-try:
-    import DNS
-    ServerError = DNS.ServerError
-    DNS.DiscoverNameServers()
-except (ImportError, AttributeError):
-    DNS = None
-
-    class ServerError(Exception):
-        pass
 
 # All we are really doing is comparing the input string to one
 # gigantic regular expression.  But building that regexp, and
@@ -99,17 +92,16 @@ MX_CHECK_CACHE = {}
 def get_mx_ip(hostname):
     if hostname not in MX_DNS_CACHE:
         try:
-            MX_DNS_CACHE[hostname] = DNS.mxlookup(hostname)
-        except ServerError as e:
-            if e.rcode == 3 or e.rcode == 2:  # NXDOMAIN (Non-Existent Domain) or SERVFAIL
-                MX_DNS_CACHE[hostname] = None
-            else:
-                raise
+            MX_DNS_CACHE[hostname] = [
+                answer.exchange.to_text() for answer in dns.resolver.query(hostname, 'MX')
+            ]
+        except dns.resolver.NXDOMAIN:
+            MX_DNS_CACHE[hostname] = None
 
     return MX_DNS_CACHE[hostname]
 
 
-def validate_email(email, check_mx=False, verify=False, debug=False, smtp_timeout=10):
+def validate_email(email, check_mx=True, verify=True, debug=False, smtp_timeout=10):
     """Indicate whether the given string is a valid email address
     according to the 'addr-spec' portion of RFC 2822 (see section
     3.4.1).  Parts of the spec that are marked obsolete are *not*
@@ -127,20 +119,17 @@ def validate_email(email, check_mx=False, verify=False, debug=False, smtp_timeou
         assert re.match(VALID_ADDRESS_REGEXP, email) is not None
         check_mx |= verify
         if check_mx:
-            if not DNS:
-                raise Exception('For check the mx records or check if the email exists you must '
-                                'have installed pyDNS python package')
             hostname = email[email.find('@') + 1:]
             mx_hosts = get_mx_ip(hostname)
             if mx_hosts is None:
                 return False
             for mx in mx_hosts:
                 try:
-                    if not verify and mx[1] in MX_CHECK_CACHE:
-                        return MX_CHECK_CACHE[mx[1]]
+                    if not verify and mx in MX_CHECK_CACHE:
+                        return MX_CHECK_CACHE[mx]
                     smtp = smtplib.SMTP(timeout=smtp_timeout)
-                    smtp.connect(mx[1])
-                    MX_CHECK_CACHE[mx[1]] = True
+                    smtp.connect(mx)
+                    MX_CHECK_CACHE[mx] = True
                     if not verify:
                         try:
                             smtp.quit()
@@ -151,7 +140,7 @@ def validate_email(email, check_mx=False, verify=False, debug=False, smtp_timeou
                     if status != 250:
                         smtp.quit()
                         if debug:
-                            logger.debug(u'%s answer: %s - %s', mx[1], status, _)
+                            logger.debug(u'%s answer: %s - %s', mx, status, _)
                         continue
                     smtp.mail('')
                     status, _ = smtp.rcpt(email)
@@ -159,20 +148,20 @@ def validate_email(email, check_mx=False, verify=False, debug=False, smtp_timeou
                         smtp.quit()
                         return True
                     if debug:
-                        logger.debug(u'%s answer: %s - %s', mx[1], status, _)
+                        logger.debug(u'%s answer: %s - %s', mx, status, _)
                     smtp.quit()
                 except smtplib.SMTPServerDisconnected:  # Server not permits verify user
                     if debug:
-                        logger.debug(u'%s disconected.', mx[1])
+                        logger.debug(u'%s disconected.', mx)
                 except smtplib.SMTPConnectError:
                     if debug:
-                        logger.debug(u'Unable to connect to %s.', mx[1])
+                        logger.debug(u'Unable to connect to %s.', mx)
             return None
     except AssertionError:
         return False
-    except (ServerError, socket.error) as e:
+    except socket.error as e:
         if debug:
-            logger.debug('ServerError or socket.error exception raised (%s).', e)
+            logger.debug('socket.error exception raised (%s).', e)
         return None
     return True
 
